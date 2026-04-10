@@ -1,0 +1,30 @@
+name: Build Docker Image
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build Docker image and save for download
+        run: |
+          make docker
+          docker save pgadmin4 > pgadmin4-image.tar
+
+      - name: Upload Docker image as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgadmin4-docker-image
+          path: pgadmin4-image.tar
+          retention-days: 7
+
+      - name: List Docker images
+        run: |
+          docker images pgadmin4

@@ -1,0 +1,140 @@
+name: Build Windows Installer
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install only missing packages via Chocolatey
+      - name: Install missing dependencies via Chocolatey
+        shell: powershell
+        run: |
+          # Install Chocolatey if not present (should be pre-installed)
+          if (!(Get-Command choco -ErrorAction SilentlyContinue)) {
+            Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+          }
+          
+          # Refresh environment variables
+          refreshenv
+          
+          # Install only packages not already present in the runner
+          choco install -y gnuwin32-coreutils.install html-help-workshop innosetup wget gzip bzip2 winflexbison3 syft
+      
+      - name: Add tools to PATH
+        shell: powershell
+        run: |
+          # Add GNUWin32 and HTML Help Workshop to PATH if needed
+          $paths = $env:PATH -split ';'
+          if (-not ($paths -contains "C:\Program Files (x86)\GnuWin32\bin")) {
+            echo "C:\Program Files (x86)\GnuWin32\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+          if (-not ($paths -contains "C:\Program Files (x86)\HTML Help Workshop")) {
+            echo "C:\Program Files (x86)\HTML Help Workshop" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+      
+      # Most tools like Python, Node.js, Git, CMake, etc. are already installed
+      - name: Upgrade pip and install virtualenv
+        run: |
+          python -m pip install --upgrade pip
+          pip install virtualenv
+      
+      # Build dependencies (using pre-built binaries as per README for PostgreSQL 17+)
+      - name: Download and extract pre-built PostgreSQL and Kerberos
+        shell: powershell
+        run: |
+          # Create build directory
+          New-Item -ItemType Directory -Path "C:\build64" -Force
+          # Create temp directory
+          New-Item -ItemType Directory -Path "C:\temp_extract" -Force
+
+          # Download PostgreSQL binaries (placeholder - replace with actual URLs)
+          # From: https://github.com/dpage/winpgbuild/actions/workflows/postgresql.yml
+          echo "Downloading pre-built PostgreSQL binaries..."
+          Invoke-WebRequest -Uri https://github.com/dpage/winpgbuild/releases/download/postgresql-18-latest/postgresql-18-latest.zip -OutFile postgresql.zip
+          Expand-Archive -Path postgresql.zip -DestinationPath "C:\temp_extract"
+          Copy-Item -Path "C:\temp_extract\postgresql\*" -Destination "C:\build64" -Recurse -Force
+          Remove-Item postgresql.zip
+
+          echo "Downloading pre-built KRB5 binaries..."
+          Invoke-WebRequest -Uri https://github.com/dpage/winpgbuild/releases/download/krb5-latest/krb5-latest.zip -OutFile krb5.zip
+          Expand-Archive -Path krb5.zip -DestinationPath "C:\temp_extract"
+          Copy-Item -Path "C:\temp_extract\krb5\*" -Destination "C:\build64" -Recurse -Force
+          Remove-Item krb5.zip
+          
+          # Delete temp directory
+          Remove-Item -Path "C:\temp_extract" -Recurse -Force
+
+          # Create remaining directories if needed
+          $dirs = @("bin", "include", "lib", "share")
+          foreach ($dir in $dirs) {
+              if (-not (Test-Path "C:\build64\$dir")) {
+                  New-Item -ItemType Directory -Path "C:\build64\$dir" -Force
+              }
+          }
+
+      - name: Set up environment variables
+        shell: bash
+        run: |
+          echo "PGADMIN_POSTGRES_DIR=C:/build64" >> $GITHUB_ENV
+          echo "PGADMIN_KRB5_DIR=C:/build64" >> $GITHUB_ENV
+          echo "PGADMIN_INNOTOOL_DIR=C:/Program Files (x86)/Inno Setup 6" >> $GITHUB_ENV
+
+          # Find VC++ redistributable
+          redist_file=$(find "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Redist/MSVC" -name "vc_redist.x64.exe" -type f | head -n 1)
+
+          if [ -n "$redist_file" ]; then
+              redist_dir=$(dirname "$redist_file")
+              echo "PGADMIN_VCREDIST_DIR=$redist_dir" >> $GITHUB_ENV
+              echo "VC++ redistributable found in: $redist_dir"
+          else
+              echo "ERROR: VC++ redistributable (vc_redist.x64.exe) not found"
+              exit 1
+          fi
+
+          PYTHON_DIR=$(dirname $(which python))
+          WINDOWS_PYTHON_DIR=$(echo "$PYTHON_DIR" | sed 's|^/c/|C:/|')
+          echo "PGADMIN_PYTHON_DIR=$WINDOWS_PYTHON_DIR" >> $GITHUB_ENV
+
+          # Find signtool directory
+          signtool_path=$(ls -d "C:/Program Files (x86)/Windows Kits/10/bin/10.0."*".0/x64" 2>/dev/null | sort -r | head -n 1)
+
+          if [ -n "$signtool_path" ]; then
+              echo "PGADMIN_SIGNTOOL_DIR=$signtool_path" >> $GITHUB_ENV
+              echo "signtool directory found: $signtool_path"
+          else
+              echo "ERROR: sign tool path not found"
+              exit 1
+          fi
+
+      # - name: Install Python dependencies
+      #   run: |
+      #     pip install -r requirements.txt
+      #     pip install sphinx
+      #     pip install sphinxcontrib-youtube
+      
+      - name: Set up node environment
+        run: |
+          npm install -g --force corepack
+          corepack enable
+
+      # - name: Build frontend
+      #   working-directory: ./web
+      #   run: |
+      #     yarn install
+      #     yarn run bundle
+      
+      - name: Build installer
+        shell: cmd
+        run: |
+          make
+          
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgadmin4-installer
+          path: dist/*.exe
+
+

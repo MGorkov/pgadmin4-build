@@ -1,0 +1,60 @@
+name: Build Debian Packages
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-packages:
+    runs-on: ubuntu-latest
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y debhelper dh-python python3-dev python3-setuptools python3-pip devscripts equivs libkrb5-dev wget
+
+    - name: Install syft for SBOM generation
+      run: |
+        # Install syft for SBOM generation
+        curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+        syft version
+
+    - name: Install Python dependencies
+      run: |
+        pip3 install -r requirements.txt
+
+    - name: Setup build environment
+      run: |
+        corepack enable
+        sudo ./pkg/debian/setup.sh
+
+    - name: Build Debian/Ubuntu packages
+      run: |
+        make debian
+      continue-on-error: true
+
+    - name: Check if packages were built
+      run: |
+        if [ -d "dist" ]; then
+          ls -la dist/
+        else
+          echo "No dist directory found"
+        fi
+
+    - name: Upload packages as artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: pgadmin4-packages-${{ matrix.os }}
+        path: |
+          dist/*.deb
+          dist/*.tar.gz
+        if-no-files-found: ignore

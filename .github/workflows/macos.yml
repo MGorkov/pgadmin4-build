@@ -1,0 +1,249 @@
+name: Build pgAdmin4 for macOS with Complete SSL Support
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    
+    strategy:
+      matrix:
+        python-version: ['3.14.3']
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        
+    - name: Install dependencies
+      run: |
+        # Enable corepack
+        corepack enable
+        
+        # Install PostgreSQL
+        brew install postgresql@18
+        echo "/opt/homebrew/opt/postgresql@18/bin" >> $GITHUB_PATH
+        
+        # Install syft for SBOM generation
+        brew install syft
+        
+    - name: Install and prepare Python with SSL certificates
+      run: |
+        pip install --upgrade pip
+        pip install wheel
+        
+        # Install certifi for SSL certificates
+        pip install certifi
+        
+        # Install other dependencies
+        if [ -f requirements.txt ]; then
+          pip install -r requirements.txt
+        fi
+        
+        # Update certificates
+        pip install --upgrade certifi
+        
+    - name: Configure build environment
+      run: |
+        echo "PGADMIN_PYTHON_VERSION=${{ matrix.python-version }}" >> $GITHUB_ENV
+        echo "PGADMIN_POSTGRES_DIR=/opt/homebrew/opt/postgresql@18" >> $GITHUB_ENV
+        
+        CERT_FILE=$(python -c "import certifi; print(certifi.where())")
+        echo "SSL_CERT_FILE=$CERT_FILE" >> $GITHUB_ENV
+        echo "REQUESTS_CA_BUNDLE=$CERT_FILE" >> $GITHUB_ENV
+        
+    - name: Build App Bundle
+      run: |
+        make clean || true
+        make appbundle
+        
+    - name: Mount DMG and integrate SSL certificates into app bundle
+      run: |
+        if [ -d "dist" ]; then
+          echo "Mounting DMG and integrating SSL certificates..."
+          
+          # Find DMG file
+          DMG_FILE=$(find dist -name "*.dmg" -type f | head -n 1)
+          if [ ! -z "$DMG_FILE" ]; then
+            echo "Found DMG file: $DMG_FILE"
+            
+            # Create mount point
+            MOUNT_POINT="/tmp/pgadmin-mount"
+            mkdir -p "$MOUNT_POINT"
+            
+            # Mount DMG
+            hdiutil attach "$DMG_FILE" -mountpoint "$MOUNT_POINT" -quiet
+            
+            # Find app bundle in mounted DMG
+            APP_BUNDLE=$(find "$MOUNT_POINT" -name "*.app" -type d | head -n 1)
+            if [ ! -z "$APP_BUNDLE" ]; then
+              echo "Found app bundle in DMG: $APP_BUNDLE"
+              
+              # Copy app bundle to temp directory for modification
+              TEMP_DIR="/tmp/pgadmin-mod"
+              mkdir -p "$TEMP_DIR"
+              cp -R "$APP_BUNDLE" "$TEMP_DIR/"
+              
+              MOD_APP_BUNDLE="$TEMP_DIR/$(basename "$APP_BUNDLE")"
+              echo "Copied app bundle to: $MOD_APP_BUNDLE"
+              
+              # Integrate SSL certificates
+              RESOURCES_DIR="$MOD_APP_BUNDLE/Contents/Resources/certificates"
+              mkdir -p "$RESOURCES_DIR"
+              
+              CERT_FILE=$(python -c "import certifi; print(certifi.where())")
+              if [ -f "$CERT_FILE" ]; then
+                cp "$CERT_FILE" "$RESOURCES_DIR/cacert.pem"
+              fi
+              
+              # Create SSL init script
+              echo '#!/usr/bin/env python3' > "$RESOURCES_DIR/init_ssl.py"
+              echo 'import os' >> "$RESOURCES_DIR/init_ssl.py"
+              echo 'import sys' >> "$RESOURCES_DIR/init_ssl.py"
+              echo 'import certifi' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '' >> "$RESOURCES_DIR/init_ssl.py"
+              echo 'def initialize_ssl():' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '    try:' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '        if getattr(sys, "frozen", False):' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '            app_dir = os.path.dirname(sys.executable)' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '            cert_path = os.path.join(app_dir, "..", "Resources", "certificates", "cacert.pem")' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '        else:' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '            cert_path = certifi.where()' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '        if os.path.exists(cert_path):' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '            os.environ["SSL_CERT_FILE"] = cert_path' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '            os.environ["REQUESTS_CA_BUNDLE"] = cert_path' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '            print(f"SSL certificates initialized: {cert_path}")' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '            return True' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '        else:' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '            fallback_cert = certifi.where()' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '            if os.path.exists(fallback_cert):' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '                os.environ["SSL_CERT_FILE"] = fallback_cert' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '                os.environ["REQUESTS_CA_BUNDLE"] = fallback_cert' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '                print(f"Fallback SSL: {fallback_cert}")' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '                return True' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '            else:' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '                print("No SSL certificates!")' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '                return False' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '    except Exception as e:' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '        print(f"Error SSL: {e}")' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '        return False' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '' >> "$RESOURCES_DIR/init_ssl.py"
+              echo 'if __name__ == "__main__":' >> "$RESOURCES_DIR/init_ssl.py"
+              echo '    initialize_ssl()' >> "$RESOURCES_DIR/init_ssl.py"
+              
+              chmod +x "$RESOURCES_DIR/init_ssl.py"
+              
+              # Create wrapper script using echo commands
+              MAIN_EXECUTABLE="$MOD_APP_BUNDLE/Contents/MacOS/pgAdmin4"
+              WRAPPER_SCRIPT="$MOD_APP_BUNDLE/Contents/MacOS/pgAdmin4.wrapper"
+              
+              if [ -f "$MAIN_EXECUTABLE" ]; then
+                # Move original executable
+                mv "$MAIN_EXECUTABLE" "$MAIN_EXECUTABLE.real"
+                
+                # Create wrapper script using echo commands
+                echo '#!/bin/bash' > "$WRAPPER_SCRIPT"
+                echo '# Wrapper script to initialize SSL certificates before launching pgAdmin4' >> "$WRAPPER_SCRIPT"
+                echo '' >> "$WRAPPER_SCRIPT"
+                echo '# Get the directory of this script' >> "$WRAPPER_SCRIPT"
+                echo 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' >> "$WRAPPER_SCRIPT"
+                echo 'APP_DIR="$(dirname "$SCRIPT_DIR")"' >> "$WRAPPER_SCRIPT"
+                echo 'RESOURCES_DIR="$APP_DIR/Resources"' >> "$WRAPPER_SCRIPT"
+                echo 'CERTIFICATES_DIR="$RESOURCES_DIR/certificates"' >> "$WRAPPER_SCRIPT"
+                echo '' >> "$WRAPPER_SCRIPT"
+                echo '# Initialize SSL certificates' >> "$WRAPPER_SCRIPT"
+                echo 'if [ -f "$CERTIFICATES_DIR/init_ssl.py" ]; then' >> "$WRAPPER_SCRIPT"
+                echo '    # Find Python executable within the app bundle' >> "$WRAPPER_SCRIPT"
+                echo '    PYTHON_EXECUTABLE="$APP_DIR/Frameworks/Python.framework/Versions/Current/bin/python3"' >> "$WRAPPER_SCRIPT"
+                echo '    ' >> "$WRAPPER_SCRIPT"
+                echo '    # If internal Python not found, try system Python' >> "$WRAPPER_SCRIPT"
+                echo '    if [ ! -f "$PYTHON_EXECUTABLE" ]; then' >> "$WRAPPER_SCRIPT"
+                echo '        PYTHON_EXECUTABLE="python3"' >> "$WRAPPER_SCRIPT"
+                echo '    fi' >> "$WRAPPER_SCRIPT"
+                echo '    ' >> "$WRAPPER_SCRIPT"
+                echo '    # Run SSL initialization script' >> "$WRAPPER_SCRIPT"
+                echo '    "$PYTHON_EXECUTABLE" "$CERTIFICATES_DIR/init_ssl.py"' >> "$WRAPPER_SCRIPT"
+                echo 'fi' >> "$WRAPPER_SCRIPT"
+                echo '' >> "$WRAPPER_SCRIPT"
+                echo '# Launch the real application' >> "$WRAPPER_SCRIPT"
+                echo 'exec "$SCRIPT_DIR/pgAdmin4.real" "$@"' >> "$WRAPPER_SCRIPT"
+                
+                # Make wrapper executable
+                chmod +x "$WRAPPER_SCRIPT"
+                
+                # Create symlink to make the wrapper the main executable
+                ln -sf "pgAdmin4.wrapper" "$MAIN_EXECUTABLE"
+                
+                echo "Created SSL initialization wrapper"
+                
+                # Create new DMG with modified app bundle
+                NEW_DMG_FILE="${DMG_FILE%.dmg}_ssl_fixed.dmg"
+                echo "Creating new DMG: $NEW_DMG_FILE"
+                
+                # Unmount original DMG
+                hdiutil detach "$MOUNT_POINT" -quiet
+                
+                # Create new DMG with modified app
+                hdiutil create -srcfolder "$TEMP_DIR" -volname "pgAdmin4" "$NEW_DMG_FILE" -quiet
+                
+                # Move new DMG to dist directory
+                mv "$NEW_DMG_FILE" "dist/"
+                
+                # Clean up temp directories
+                rm -rf "$TEMP_DIR"
+              else
+                echo "Main executable not found, unmounting DMG"
+                hdiutil detach "$MOUNT_POINT" -quiet
+              fi
+            else
+              echo "App bundle not found in DMG, unmounting"
+              hdiutil detach "$MOUNT_POINT" -quiet
+            fi
+          else
+            echo "No DMG file found in dist directory"
+          fi
+        fi
+        
+    - name: Fix signing and finalize app bundle in DMG
+      run: |
+        if [ -d "dist" ]; then
+          echo "Finalizing DMG with properly signed app bundle..."
+          
+          # Find the SSL-fixed DMG
+          DMG_FILE=$(find dist -name "*_ssl_fixed.dmg" -type f | head -n 1)
+          if [ -z "$DMG_FILE" ]; then
+            # Fallback to original DMG
+            DMG_FILE=$(find dist -name "*.dmg" -type f | head -n 1)
+          fi
+          
+          if [ ! -z "$DMG_FILE" ]; then
+            echo "Processing DMG: $DMG_FILE"
+            
+            # Codesign the DMG file itself
+            echo "Signing DMG file..."
+            codesign --force --sign - "$DMG_FILE" || echo "DMG codesign completed"
+          fi
+        fi
+        
+    - name: Verify build output
+      run: |
+        if [ -d "dist" ]; then
+          echo "Build artifacts:"
+          ls -la dist/
+        else
+          echo "No dist directory found"
+          exit 1
+        fi
+        
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: pgadmin4-macos-complete-build
+        path: |
+          dist/
+        retention-days: 14

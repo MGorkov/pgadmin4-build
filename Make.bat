@@ -172,6 +172,7 @@ REM Main build sequence Ends
     ECHO Installing dependencies...
     CALL python -m pip install --upgrade pip || EXIT /B 1
     CALL pip install --only-binary=cryptography -r "%WD%\requirements.txt" || EXIT /B 1
+    CALL pip install setuptools==52 || EXIT /B 1
 
     CD %WD%
     EXIT /B 0
@@ -260,7 +261,8 @@ REM Main build sequence Ends
     MKDIR "%BUILDROOT%\docs\en_US\html"
     CD "%WD%\docs\en_US"
     CALL "%TMPDIR%\venv\Scripts\python.exe" build_code_snippet.py || EXIT /B 1
-    CALL "%TMPDIR%\venv\Scripts\sphinx-build.exe" "%WD%\docs\en_US" "%BUILDROOT%\docs\en_US\html" || EXIT /B 1
+    CALL "%TMPDIR%\venv\Scripts\python.exe" -m sphinx.cmd.build "%WD%\docs\en_US" "%BUILDROOT%\docs\en_US\html" || EXIT /B 1
+    REM CALL "%TMPDIR%\venv\Scripts\sphinx-build.exe" "%WD%\docs\en_US" "%BUILDROOT%\docs\en_US\html" || EXIT /B 1
 
     REM Remove unnecessary doc files
     DEL /q "%BUILDROOT%\docs\en_US\html\_static\*.png" 1> nul 2>&1
