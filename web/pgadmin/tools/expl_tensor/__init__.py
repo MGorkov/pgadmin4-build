@@ -39,7 +39,7 @@ class ExplTensorModule(PgAdminModule):
 
         self.explain_module = self.preference.register(
             'Explain Tensor', 'explain_tensor',
-            gettext("Explain Plan"), 'boolean', False,
+            gettext("Explain Plan"), 'boolean', True,
             category_label=gettext('Configuration'),
             help_str=gettext('Analyze query plan via Explain Tensor API')
         )
@@ -58,7 +58,7 @@ class ExplTensorModule(PgAdminModule):
 
         self.explain_tensor_private = self.preference.register(
             'Explain Tensor', 'explain_tensor_private',
-            gettext("Private Plans"), 'boolean', False,
+            gettext("Private Plans"), 'boolean', True,
             category_label=gettext('Configuration'),
             help_str=gettext(
                 'Hide plans from public access on Explain Tensor'
@@ -67,7 +67,7 @@ class ExplTensorModule(PgAdminModule):
 
         self.explain_tensor_format = self.preference.register(
             'Explain Tensor', 'explain_tensor_format',
-            gettext("Format SQL"), 'boolean', False,
+            gettext("Format SQL"), 'boolean', True,
             category_label=gettext('Configuration'),
             help_str=gettext('Format SQL using Explain Tensor API')
         )
